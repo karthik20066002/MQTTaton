@@ -668,8 +668,8 @@ func (c *Client) handlePublish(flags byte, data []byte, b *Broker) {
 		c.mu.Lock()
 		c.sessions[packetID] = &InFlight{PID: packetID, QoS: 1, Topic: topic, Payload: payload}
 		c.mu.Unlock()
-		c.send(makePubackPkt(packetID))
 		b.broadcast(c, topic, payload, 1)
+		c.send(makePubackPkt(packetID))
 	} else if qos == 2 {
 		c.mu.Lock()
 		c.sessions[packetID] = &InFlight{PID: packetID, QoS: 2, Topic: topic, Payload: payload}
