@@ -68,7 +68,20 @@ func readByte(r io.Reader) (byte, error) {
 	return b[0], err
 }
 
+const (
+	maxPacketSize   = 256 * 1024 // 256KB maximum packet size
+	maxUTF8Length   = 65535      // Maximum UTF-8 string length per MQTT spec
+	maxTopicLength  = 65535      // Maximum topic length per MQTT spec
+	maxClientIDLength = 23       // Maximum client ID length for MQTT 3.1.1
+)
+
 func readBytes(r io.Reader, n int) ([]byte, error) {
+	if n < 0 {
+		return nil, fmt.Errorf("invalid packet size: %d", n)
+	}
+	if n > maxPacketSize {
+		return nil, fmt.Errorf("packet size too large: %d (max %d)", n, maxPacketSize)
+	}
 	buf := make([]byte, n)
 	_, err := io.ReadFull(r, buf)
 	return buf, err
@@ -79,8 +92,8 @@ func readUTF8(r io.Reader) (string, error) {
 	if err := binary.Read(r, binary.BigEndian, &n); err != nil {
 		return "", err
 	}
-	if n > 65535 {
-		return "", fmt.Errorf("utf8 string too long: %d", n)
+	if n > maxUTF8Length {
+		return "", fmt.Errorf("utf8 string too long: %d (max %d)", n, maxUTF8Length)
 	}
 	b, err := readBytes(r, int(n))
 	if err != nil {
@@ -589,6 +602,17 @@ func (c *Client) handleConnect(data []byte, b *Broker) {
 			readBytes(r, int(pl))
 		}
 	}
+	// Validate client ID
+	if len(clientID) == 0 {
+		c.send(makeConnAck(false, ReasonClientIdentifierNotValid))
+		return
+	}
+	if len(clientID) > maxClientIDLength {
+		c.send(makeConnAck(false, ReasonClientIdentifierNotValid))
+		return
+	}
+	c.ID = clientID
+	
 	log.Printf("[%s] connected clean=%d proto=%s level=%d keepalive=%v", c.ID, boolToInt(cleanSession), protoName, protoLevel, c.keepalive)
 	b.addClient(c)
 	c.send(makeConnAck(true, ReasonSuccess))
@@ -616,12 +640,25 @@ func (c *Client) handlePublish(flags byte, data []byte, b *Broker) {
 	if err != nil {
 		return
 	}
+	// Validate topic name
+	if len(topic) == 0 || len(topic) > maxTopicLength {
+		return
+	}
+	if topic[0] == '$' {
+		// System topic prefix - could add more validation here
+		return
+	}
 	var packetID uint16
 	if qos > 0 {
 		binary.Read(r, binary.BigEndian, &packetID)
 	}
-	payload := make([]byte, r.Len())
-	if r.Len() > 0 {
+	// Validate payload size
+	payloadSize := r.Len()
+	if payloadSize > maxPacketSize {
+		return
+	}
+	payload := make([]byte, payloadSize)
+	if payloadSize > 0 {
 		io.ReadFull(r, payload)
 	}
 	log.Printf("[%s] PUBLISH topic=%s qos=%d retain=%v len=%d", c.ID, topic, qos, retain, len(payload))
