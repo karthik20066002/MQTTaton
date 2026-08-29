@@ -797,6 +797,9 @@ func (c *Client) handlePingreq(b *Broker) {
 func (c *Client) handleDisconnect(b *Broker) {
 	c.running = false
 	b.removeClient(c)
+	c.mu.Lock()
+	c.sessions = make(map[uint16]*InFlight)
+	c.mu.Unlock()
 	c.Conn.Close()
 }
 
