@@ -244,19 +244,28 @@ type Client struct {
 }
 
 type Broker struct {
-	mu      sync.RWMutex
-	clients map[*Client]bool
-	addr    string
-	done    chan struct{}
-	listener net.Listener
+	mu         sync.RWMutex
+	clients    map[*Client]bool
+	addr       string
+	done       chan struct{}
+	listener   net.Listener
+	username   string
+	password   string
 }
 
 func NewBroker(addr string) *Broker {
 	return &Broker{
-		clients: make(map[*Client]bool),
-		addr:    addr,
-		done:    make(chan struct{}),
+		clients:  make(map[*Client]bool),
+		addr:     addr,
+		done:     make(chan struct{}),
+		username: "", // Empty string means no authentication
+		password: "",
 	}
+}
+
+func (b *Broker) SetAuth(username, password string) {
+	b.username = username
+	b.password = password
 }
 
 func (b *Broker) addClient(c *Client) {
@@ -594,16 +603,25 @@ func (c *Client) handleConnect(data []byte, b *Broker) {
 		_ = wt
 		_ = wm
 	}
+	var clientUsername, clientPassword string
 	if usernameFlag {
 		u, _ := readUTF8(r)
-		_ = u
+		clientUsername = u
 	}
 	if passwordFlag {
 		pl, _ := readU16BE(r)
 		if pl > 0 {
-			readBytes(r, int(pl))
+			passBytes, _ := readBytes(r, int(pl))
+			clientPassword = string(passBytes)
 		}
 	}
+	
+	// Validate authentication
+	if b.username != "" && (clientUsername != b.username || clientPassword != b.password) {
+		c.send(makeConnAck(false, ReasonBadUserNameOrPassword))
+		return
+	}
+	
 	// Validate client ID
 	if len(clientID) == 0 {
 		c.send(makeConnAck(false, ReasonClientIdentifierNotValid))
@@ -858,11 +876,16 @@ func (b *Broker) Stop() {
 // ──────────────────────────────────────────────────────────────────────
 
 var (
-	portFlag = flag.String("port", "1883", "TCP port to listen on")
+	portFlag    = flag.String("port", "1883", "TCP port to listen on")
+	usernameFlag = flag.String("username", "", "Username for authentication")
+	passwordFlag = flag.String("password", "", "Password for authentication")
 )
 
 func main() {
 	flag.Parse()
 	b := NewBroker(":" + *portFlag)
+	if *usernameFlag != "" {
+		b.SetAuth(*usernameFlag, *passwordFlag)
+	}
 	b.listen()
 }
