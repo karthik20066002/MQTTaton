@@ -537,35 +537,42 @@ func (c *Client) handleConnect(data []byte, b *Broker) {
 	if err != nil {
 		return
 	}
+	
 	cleanSession := connFlags&0x02 != 0
 	willFlag := connFlags&0x04 != 0
 	willQoS := (connFlags >> 3) & 0x03
 	willRetain := connFlags&0x20 != 0
 	passwordFlag := connFlags&0x40 != 0
 	usernameFlag := connFlags&0x80 != 0
+	
 	keepAlive, err := readU16BE(r)
 	if err != nil {
 		return
 	}
+	
 	c.keepalive = time.Duration(keepAlive) * time.Second
 	c.clean = cleanSession
+	
 	_ = willFlag
 	_ = willQoS
 	_ = willRetain
 	_ = passwordFlag
 	_ = usernameFlag
+	
 	// Properties
 	propsLen, err := decodeRemainingLength(r)
 	if err != nil {
 		return
 	}
+	log.Printf("[%s] reading %d properties", c.ID, propsLen)
 	for propsLen > 0 {
 		propID, err := readByte(r)
 		if err != nil {
+			log.Printf("[%s] failed to read property ID: %v", c.ID, err)
 			break
 		}
 		propsLen--
-		switch propID {
+			switch propID {
 		case 0x11: // session expiry interval (4 bytes)
 			if propsLen >= 4 {
 				var v uint32
@@ -591,6 +598,7 @@ func (c *Client) handleConnect(data []byte, b *Broker) {
 			propsLen = 0
 		}
 	}
+	
 	clientID, err := readUTF8(r)
 	if err != nil {
 		return

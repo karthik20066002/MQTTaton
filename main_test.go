@@ -696,89 +696,13 @@ func TestDuplicateMessageHandling(t *testing.T) {
 	b.Stop()
 }
 
-// Helper functions for QoS tests
-func connectClient(conn net.Conn, clientID string) {
-	var connect bytes.Buffer
-	writeUTF8(&connect, "MQTT")
-	writeByte(&connect, 5)
-	writeByte(&connect, 0x02)
-	binary.Write(&connect, binary.BigEndian, uint16(60))
-	writeByte(&connect, 0)
-	writeUTF8(&connect, clientID)
-	
-	var buf bytes.Buffer
-	writeByte(&buf, TypeConnect)
-	rl := encodeRemainingLength(connect.Len())
-	buf.Write(rl)
-	buf.Write(connect.Bytes())
-	
-	if _, err := conn.Write(buf.Bytes()); err != nil {
-		panic(err)
-	}
-	
-	// Read CONNACK
-	time.Sleep(50 * time.Millisecond)
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	first, err := readByte(conn)
-	if err != nil {
-		panic(err)
-	}
-	if first != TypeConnack {
-		panic(fmt.Sprintf("expected CONNACK 0x%02x, got 0x%02x", TypeConnack, first))
-	}
-}
 
-func subscribeClient(conn net.Conn, topic string, qos byte) {
-	packetID := uint16(1)
-	var subscribe bytes.Buffer
-	binary.Write(&subscribe, binary.BigEndian, packetID)
-	writeUTF8(&subscribe, topic)
-	writeByte(&subscribe, qos)
-	
-	var buf bytes.Buffer
-	writeByte(&buf, TypeSubscribe)
-	rl := encodeRemainingLength(subscribe.Len())
-	buf.Write(rl)
-	buf.Write(subscribe.Bytes())
-	
-	if _, err := conn.Write(buf.Bytes()); err != nil {
-		panic(err)
-	}
-}
 
-func publishQoS1(conn net.Conn, topic string, payload string) {
-	var publish bytes.Buffer
-	writeUTF8(&publish, topic)
-	binary.Write(&publish, binary.BigEndian, uint16(0))
-	publish.WriteString(payload)
-	
-	var buf bytes.Buffer
-	writeByte(&buf, TypePublish|0x02) // QoS 1, no DUP
-	rl := encodeRemainingLength(publish.Len())
-	buf.Write(rl)
-	buf.Write(publish.Bytes())
-	
-	if _, err := conn.Write(buf.Bytes()); err != nil {
-		panic(err)
-	}
-}
 
-func publishQoS2(conn net.Conn, topic string, payload string, packetID uint16) {
-	var publish bytes.Buffer
-	writeUTF8(&publish, topic)
-	binary.Write(&publish, binary.BigEndian, packetID)
-	publish.WriteString(payload)
-	
-	var buf bytes.Buffer
-	writeByte(&buf, TypePublish|0x06) // QoS 2, no DUP
-	rl := encodeRemainingLength(publish.Len())
-	buf.Write(rl)
-	buf.Write(publish.Bytes())
-	
-	if _, err := conn.Write(buf.Bytes()); err != nil {
-		panic(err)
-	}
-}
+
+
+
+
 
 func publishQoS1WithDup(conn net.Conn, topic string, payload string, packetID uint16) {
 	var publish bytes.Buffer
@@ -797,17 +721,7 @@ func publishQoS1WithDup(conn net.Conn, topic string, payload string, packetID ui
 	}
 }
 
-func sendPubrel(conn net.Conn, packetID uint16) {
-	var buf bytes.Buffer
-	writeByte(&buf, TypePubrel|0x02) // QoS 1
-	rl := encodeRemainingLength(2)
-	buf.Write(rl)
-	binary.Write(&buf, binary.BigEndian, packetID)
-	
-	if _, err := conn.Write(buf.Bytes()); err != nil {
-		panic(err)
-	}
-}
+
 
 // ──────────────────────────────────────────────────────────────────────
 // Authentication Tests
@@ -969,34 +883,7 @@ func TestAnonymousAccess(t *testing.T) {
 	b.Stop()
 }
 
-// Helper function for authenticated connection
-func connectClientWithAuth(conn net.Conn, username, password, clientID string) {
-	var connect bytes.Buffer
-	writeUTF8(&connect, "MQTT")
-	writeByte(&connect, 5)
-	writeByte(&connect, 0xC2) // Clean session, username and password flags
-	binary.Write(&connect, binary.BigEndian, uint16(60))
-	writeByte(&connect, 0)
-	writeUTF8(&connect, clientID)
-	
-	// Add username
-	writeUTF8(&connect, username)
-	
-	// Add password
-	passwordBytes := []byte(password)
-	binary.Write(&connect, binary.BigEndian, uint16(len(passwordBytes)))
-	connect.Write(passwordBytes)
-	
-	var buf bytes.Buffer
-	writeByte(&buf, TypeConnect)
-	rl := encodeRemainingLength(connect.Len())
-	buf.Write(rl)
-	buf.Write(connect.Bytes())
-	
-	if _, err := conn.Write(buf.Bytes()); err != nil {
-		panic(err)
-	}
-}
+
 
 // ──────────────────────────────────────────────────────────────────────
 // Integration Tests

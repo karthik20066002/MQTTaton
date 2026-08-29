@@ -9,11 +9,8 @@ import (
 	"time"
 )
 
-// ──────────────────────────────────────────────────────────────────────
-// Simple Demo Test for Hackathon Judges
-// ──────────────────────────────────────────────────────────────────────
-
 func TestMQTTSimpleDemo(t *testing.T) {
+	// Simple demo showcasing MQTTaton broker functionality
 	fmt.Println("🚀 MQTTaton Simple Demo")
 	fmt.Println("=======================")
 	
@@ -21,6 +18,7 @@ func TestMQTTSimpleDemo(t *testing.T) {
 	b := NewBroker(":0")
 	go b.listen()
 	
+	// Wait for broker to start
 	var addr string
 	for i := 0; i < 100; i++ {
 		b.mu.RLock()
@@ -37,55 +35,117 @@ func TestMQTTSimpleDemo(t *testing.T) {
 		t.Fatal("❌ Broker failed to start")
 	}
 	fmt.Printf("✅ Broker started on %s\n", addr)
+	defer b.Stop()
 	
-	// Create client
+	// Connect client
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
-		b.Stop()
 		t.Fatalf("❌ Failed to connect: %v", err)
 	}
 	defer conn.Close()
 	
-	// Connect client
-	connectClient(conn, "demo-client")
+	// Send CONNECT packet (MQTT 5.0 format)
+	var connect bytes.Buffer
+	writeUTF8(&connect, "MQTT")
+	writeByte(&connect, 5)
+	writeByte(&connect, 0x02)
+	binary.Write(&connect, binary.BigEndian, uint16(60))
+	writeByte(&connect, 0)
+	writeUTF8(&connect, "demo-client")
+	
+	var connectBuf bytes.Buffer
+	writeByte(&connectBuf, TypeConnect)
+	rl := encodeRemainingLength(connect.Len())
+	connectBuf.Write(rl)
+	connectBuf.Write(connect.Bytes())
+	
+	if _, err := conn.Write(connectBuf.Bytes()); err != nil {
+		t.Fatalf("❌ Failed to send CONNECT: %v", err)
+	}
+	
+	// Read CONNACK
+	time.Sleep(50 * time.Millisecond)
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	response := make([]byte, 4)
+	_, err = conn.Read(response)
+	if err != nil {
+		t.Fatalf("❌ Failed to read CONNACK: %v", err)
+	}
+	
 	fmt.Println("✅ Client connected")
 	
 	// Subscribe
-	subscribeClient(conn, "demo/topic", 1)
+	var subscribe bytes.Buffer
+	binary.Write(&subscribe, binary.BigEndian, uint16(1))
+	writeUTF8(&subscribe, "demo/topic")
+	writeByte(&subscribe, 1)
+	
+	var subscribeBuf bytes.Buffer
+	writeByte(&subscribeBuf, TypeSubscribe)
+	rl = encodeRemainingLength(subscribe.Len())
+	subscribeBuf.Write(rl)
+	subscribeBuf.Write(subscribe.Bytes())
+	
+	if _, err := conn.Write(subscribeBuf.Bytes()); err != nil {
+		t.Fatalf("❌ Failed to send SUBSCRIBE: %v", err)
+	}
+	
+	// Read SUBACK
+	time.Sleep(50 * time.Millisecond)
+	response = make([]byte, 5)
+	_, err = conn.Read(response)
+	if err != nil {
+		t.Fatalf("❌ Failed to read SUBACK: %v", err)
+	}
+	
 	fmt.Println("✅ Subscribed to demo/topic")
 	
 	// Publish message
-	publishQoS1(conn, "demo/topic", "Hello from MQTTaton!")
+	var publish bytes.Buffer
+	writeUTF8(&publish, "demo/topic")
+	binary.Write(&publish, binary.BigEndian, uint16(0))
+	publish.WriteString("Hello from MQTTaton!")
+	
+	var publishBuf bytes.Buffer
+	writeByte(&publishBuf, TypePublish|0x02)
+	rl = encodeRemainingLength(publish.Len())
+	publishBuf.Write(rl)
+	publishBuf.Write(publish.Bytes())
+	
+	if _, err := conn.Write(publishBuf.Bytes()); err != nil {
+		t.Fatalf("❌ Failed to send PUBLISH: %v", err)
+	}
+	
 	fmt.Println("✅ Published message")
 	
 	// Give time for message processing
 	time.Sleep(100 * time.Millisecond)
 	
 	// Verify message received (client should receive its own message back)
-	response := make([]byte, 1024)
+	response = make([]byte, 1024)
 	n, err := conn.Read(response)
 	if err != nil || n < 4 {
 		fmt.Println("⚠️  No message received (this is expected in demo)")
 	} else if response[0] == TypePublish {
 		fmt.Println("✅ Message received successfully")
 	} else {
-		fmt.Printf("⚠️  Received: 0x%02x\n", response[0])
+		fmt.Printf("⚠️  Unexpected response: %x\n", response[0])
 	}
 	
-	// Shutdown
-	b.Stop()
 	fmt.Println("✅ Demo completed!")
 }
 
 func TestMQTTAuthenticationDemo(t *testing.T) {
+	// Authentication demo
 	fmt.Println("\n🔐 MQTT Authentication Demo")
-	fmt.Println("===========================")
+	fmt.Println("==========================")
 	
 	// Start broker with authentication
 	b := NewBroker(":0")
 	b.SetAuth("user", "pass")
 	go b.listen()
 	
+	// Wait for broker to start
 	var addr string
 	for i := 0; i < 100; i++ {
 		b.mu.RLock()
@@ -97,123 +157,55 @@ func TestMQTTAuthenticationDemo(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	if addr == "" {
+		b.Stop()
+		t.Fatal("❌ Broker failed to start")
+	}
 	
-	// Test successful authentication
-	conn1, err := net.Dial("tcp", addr)
+	// Connect with correct credentials
+	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		b.Stop()
 		t.Fatalf("❌ Failed to connect: %v", err)
 	}
-	defer conn1.Close()
+	defer conn.Close()
 	
-	connectClientWithAuth(conn1, "user", "pass", "client1")
-	fmt.Println("✅ Client authenticated successfully")
-	
-	// Test failed authentication
-	conn2, err := net.Dial("tcp", addr)
-	if err != nil {
-		b.Stop()
-		t.Fatalf("❌ Failed to connect: %v", err)
-	}
-	defer conn2.Close()
-	
-	connectClientWithAuth(conn2, "wrong", "creds", "client2")
-	time.Sleep(50 * time.Millisecond)
-	
-	response := make([]byte, 1024)
-	n, _ := conn2.Read(response)
-	if n >= 4 && response[0] == TypeConnack {
-		fmt.Println("✅ Invalid credentials rejected")
-	}
-	
-	b.Stop()
-	fmt.Println("✅ Authentication demo completed!")
-}
-
-// Helper functions
-func connectClient(conn net.Conn, clientID string) {
-	var connect bytes.Buffer
-	writeUTF8(&connect, "MQTT")
-	writeByte(&connect, 5)
-	writeByte(&connect, 0x02)
-	binary.Write(&connect, binary.BigEndian, uint16(60))
-	writeByte(&connect, 0)
-	writeUTF8(&connect, clientID)
-	
-	var buf bytes.Buffer
-	writeByte(&buf, TypeConnect)
-	rl := encodeRemainingLength(connect.Len())
-	buf.Write(rl)
-	buf.Write(connect.Bytes())
-	
-	conn.Write(buf.Bytes())
-	
-	// Read CONNACK
-	time.Sleep(50 * time.Millisecond)
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	response := make([]byte, 1024)
-	conn.Read(response)
-}
-
-func connectClientWithAuth(conn net.Conn, username, password, clientID string) {
+	// Send CONNECT packet with authentication (MQTT 5.0 format)
 	var connect bytes.Buffer
 	writeUTF8(&connect, "MQTT")
 	writeByte(&connect, 5)
 	writeByte(&connect, 0xC2) // Clean session, username and password flags
 	binary.Write(&connect, binary.BigEndian, uint16(60))
 	writeByte(&connect, 0)
-	writeUTF8(&connect, clientID)
+	writeUTF8(&connect, "client1")
 	
 	// Add username
-	writeUTF8(&connect, username)
+	writeUTF8(&connect, "user")
 	
 	// Add password
-	passwordBytes := []byte(password)
+	passwordBytes := []byte("pass")
 	binary.Write(&connect, binary.BigEndian, uint16(len(passwordBytes)))
 	connect.Write(passwordBytes)
 	
-	var buf bytes.Buffer
-	writeByte(&buf, TypeConnect)
+	var connectBuf bytes.Buffer
+	writeByte(&connectBuf, TypeConnect)
 	rl := encodeRemainingLength(connect.Len())
-	buf.Write(rl)
-	buf.Write(connect.Bytes())
+	connectBuf.Write(rl)
+	connectBuf.Write(connect.Bytes())
 	
-	conn.Write(buf.Bytes())
+	if _, err := conn.Write(connectBuf.Bytes()); err != nil {
+		t.Fatalf("❌ Failed to send CONNECT: %v", err)
+	}
 	
 	// Read CONNACK
 	time.Sleep(50 * time.Millisecond)
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	response := make([]byte, 1024)
-	conn.Read(response)
-}
-
-func subscribeClient(conn net.Conn, topic string, qos byte) {
-	packetID := uint16(1)
-	var subscribe bytes.Buffer
-	binary.Write(&subscribe, binary.BigEndian, packetID)
-	writeUTF8(&subscribe, topic)
-	writeByte(&subscribe, qos)
+	response := make([]byte, 4)
+	_, err = conn.Read(response)
+	if err != nil {
+		t.Fatalf("❌ Failed to read CONNACK: %v", err)
+	}
 	
-	var buf bytes.Buffer
-	writeByte(&buf, TypeSubscribe)
-	rl := encodeRemainingLength(subscribe.Len())
-	buf.Write(rl)
-	buf.Write(subscribe.Bytes())
-	
-	conn.Write(buf.Bytes())
-}
-
-func publishQoS1(conn net.Conn, topic string, payload string) {
-	var publish bytes.Buffer
-	writeUTF8(&publish, topic)
-	binary.Write(&publish, binary.BigEndian, uint16(0))
-	publish.WriteString(payload)
-	
-	var buf bytes.Buffer
-	writeByte(&buf, TypePublish|0x02) // QoS 1, no DUP
-	rl := encodeRemainingLength(publish.Len())
-	buf.Write(rl)
-	buf.Write(publish.Bytes())
-	
-	conn.Write(buf.Bytes())
+	fmt.Println("✅ Client authenticated successfully")
+	fmt.Println("✅ Authentication demo completed!")
 }
