@@ -315,7 +315,9 @@ func (c *Client) send(data []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.Conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	_, _ = c.Conn.Write(data)
+	if _, err := c.Conn.Write(data); err != nil {
+		log.Printf("[%s] send error: %v", c.ID, err)
+	}
 }
 
 func (c *Client) addSub(filter string, qos byte) {
