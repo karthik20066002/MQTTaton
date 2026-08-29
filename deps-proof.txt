@@ -1,0 +1,7 @@
+== go.mod (dependency manifest) ==
+module github.com/karthik20066002/MQTTaton
+
+go 1.27.0
+
+== 'require' directives: none expected ==
+PASS: no require block (zero third-party runtime deps)

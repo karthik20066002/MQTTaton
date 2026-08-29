@@ -1,18 +1,17 @@
 GO ?= go
-BIN := bin/mqtt-example
+BIN := bin/mqttaton
 
 .PHONY: build run test deps-proof clean
 
 build:
-	$(GO) build -o $(BIN) ./cmd/example
+	$(GO) build -o $(BIN) .
 
 run:
-	$(GO) run ./cmd/example
+	$(GO) run . -port 1883
 
 test:
-	$(GO) test ./...
+	$(GO) test -v -count=1 .
 
-# Regenerates deps-proof.txt: shows the go.mod has no require block.
 deps-proof:
 	@echo "== go.mod (dependency manifest) ==" > deps-proof.txt
 	@cat go.mod >> deps-proof.txt
