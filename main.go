@@ -68,7 +68,20 @@ func readByte(r io.Reader) (byte, error) {
 	return b[0], err
 }
 
+const (
+	maxPacketSize   = 256 * 1024 // 256KB maximum packet size
+	maxUTF8Length   = 65535      // Maximum UTF-8 string length per MQTT spec
+	maxTopicLength  = 65535      // Maximum topic length per MQTT spec
+	maxClientIDLength = 23       // Maximum client ID length for MQTT 3.1.1
+)
+
 func readBytes(r io.Reader, n int) ([]byte, error) {
+	if n < 0 {
+		return nil, fmt.Errorf("invalid packet size: %d", n)
+	}
+	if n > maxPacketSize {
+		return nil, fmt.Errorf("packet size too large: %d (max %d)", n, maxPacketSize)
+	}
 	buf := make([]byte, n)
 	_, err := io.ReadFull(r, buf)
 	return buf, err
@@ -79,8 +92,8 @@ func readUTF8(r io.Reader) (string, error) {
 	if err := binary.Read(r, binary.BigEndian, &n); err != nil {
 		return "", err
 	}
-	if n > 65535 {
-		return "", fmt.Errorf("utf8 string too long: %d", n)
+	if n > maxUTF8Length {
+		return "", fmt.Errorf("utf8 string too long: %d (max %d)", n, maxUTF8Length)
 	}
 	b, err := readBytes(r, int(n))
 	if err != nil {
@@ -231,19 +244,28 @@ type Client struct {
 }
 
 type Broker struct {
-	mu      sync.RWMutex
-	clients map[*Client]bool
-	addr    string
-	done    chan struct{}
-	listener net.Listener
+	mu         sync.RWMutex
+	clients    map[*Client]bool
+	addr       string
+	done       chan struct{}
+	listener   net.Listener
+	username   string
+	password   string
 }
 
 func NewBroker(addr string) *Broker {
 	return &Broker{
-		clients: make(map[*Client]bool),
-		addr:    addr,
-		done:    make(chan struct{}),
+		clients:  make(map[*Client]bool),
+		addr:     addr,
+		done:     make(chan struct{}),
+		username: "", // Empty string means no authentication
+		password: "",
 	}
+}
+
+func (b *Broker) SetAuth(username, password string) {
+	b.username = username
+	b.password = password
 }
 
 func (b *Broker) addClient(c *Client) {
@@ -302,7 +324,9 @@ func (c *Client) send(data []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.Conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	_, _ = c.Conn.Write(data)
+	if _, err := c.Conn.Write(data); err != nil {
+		log.Printf("[%s] send error: %v", c.ID, err)
+	}
 }
 
 func (c *Client) addSub(filter string, qos byte) {
@@ -513,35 +537,42 @@ func (c *Client) handleConnect(data []byte, b *Broker) {
 	if err != nil {
 		return
 	}
+	
 	cleanSession := connFlags&0x02 != 0
 	willFlag := connFlags&0x04 != 0
 	willQoS := (connFlags >> 3) & 0x03
 	willRetain := connFlags&0x20 != 0
 	passwordFlag := connFlags&0x40 != 0
 	usernameFlag := connFlags&0x80 != 0
+	
 	keepAlive, err := readU16BE(r)
 	if err != nil {
 		return
 	}
+	
 	c.keepalive = time.Duration(keepAlive) * time.Second
 	c.clean = cleanSession
+	
 	_ = willFlag
 	_ = willQoS
 	_ = willRetain
 	_ = passwordFlag
 	_ = usernameFlag
+	
 	// Properties
 	propsLen, err := decodeRemainingLength(r)
 	if err != nil {
 		return
 	}
+	log.Printf("[%s] reading %d properties", c.ID, propsLen)
 	for propsLen > 0 {
 		propID, err := readByte(r)
 		if err != nil {
+			log.Printf("[%s] failed to read property ID: %v", c.ID, err)
 			break
 		}
 		propsLen--
-		switch propID {
+			switch propID {
 		case 0x11: // session expiry interval (4 bytes)
 			if propsLen >= 4 {
 				var v uint32
@@ -567,6 +598,7 @@ func (c *Client) handleConnect(data []byte, b *Broker) {
 			propsLen = 0
 		}
 	}
+	
 	clientID, err := readUTF8(r)
 	if err != nil {
 		return
@@ -579,16 +611,36 @@ func (c *Client) handleConnect(data []byte, b *Broker) {
 		_ = wt
 		_ = wm
 	}
+	var clientUsername, clientPassword string
 	if usernameFlag {
 		u, _ := readUTF8(r)
-		_ = u
+		clientUsername = u
 	}
 	if passwordFlag {
 		pl, _ := readU16BE(r)
 		if pl > 0 {
-			readBytes(r, int(pl))
+			passBytes, _ := readBytes(r, int(pl))
+			clientPassword = string(passBytes)
 		}
 	}
+	
+	// Validate authentication
+	if b.username != "" && (clientUsername != b.username || clientPassword != b.password) {
+		c.send(makeConnAck(false, ReasonBadUserNameOrPassword))
+		return
+	}
+	
+	// Validate client ID
+	if len(clientID) == 0 {
+		c.send(makeConnAck(false, ReasonClientIdentifierNotValid))
+		return
+	}
+	if len(clientID) > maxClientIDLength {
+		c.send(makeConnAck(false, ReasonClientIdentifierNotValid))
+		return
+	}
+	c.ID = clientID
+	
 	log.Printf("[%s] connected clean=%d proto=%s level=%d keepalive=%v", c.ID, boolToInt(cleanSession), protoName, protoLevel, c.keepalive)
 	b.addClient(c)
 	c.send(makeConnAck(true, ReasonSuccess))
@@ -616,23 +668,40 @@ func (c *Client) handlePublish(flags byte, data []byte, b *Broker) {
 	if err != nil {
 		return
 	}
+	// Validate topic name
+	if len(topic) == 0 || len(topic) > maxTopicLength {
+		return
+	}
+	if topic[0] == '$' {
+		// System topic prefix - could add more validation here
+		return
+	}
 	var packetID uint16
 	if qos > 0 {
 		binary.Read(r, binary.BigEndian, &packetID)
 	}
-	payload := make([]byte, r.Len())
-	if r.Len() > 0 {
+	// Validate payload size
+	payloadSize := r.Len()
+	if payloadSize > maxPacketSize {
+		return
+	}
+	payload := make([]byte, payloadSize)
+	if payloadSize > 0 {
 		io.ReadFull(r, payload)
 	}
 	log.Printf("[%s] PUBLISH topic=%s qos=%d retain=%v len=%d", c.ID, topic, qos, retain, len(payload))
 	if qos == 0 {
 		b.broadcast(c, topic, payload, 0)
 	} else if qos == 1 {
+		c.mu.Lock()
 		c.sessions[packetID] = &InFlight{PID: packetID, QoS: 1, Topic: topic, Payload: payload}
-		c.send(makePubackPkt(packetID))
+		c.mu.Unlock()
 		b.broadcast(c, topic, payload, 1)
+		c.send(makePubackPkt(packetID))
 	} else if qos == 2 {
+		c.mu.Lock()
 		c.sessions[packetID] = &InFlight{PID: packetID, QoS: 2, Topic: topic, Payload: payload}
+		c.mu.Unlock()
 		c.send(makePubrecPkt(packetID))
 	}
 }
@@ -754,6 +823,9 @@ func (c *Client) handlePingreq(b *Broker) {
 func (c *Client) handleDisconnect(b *Broker) {
 	c.running = false
 	b.removeClient(c)
+	c.mu.Lock()
+	c.sessions = make(map[uint16]*InFlight)
+	c.mu.Unlock()
 	c.Conn.Close()
 }
 
@@ -812,11 +884,16 @@ func (b *Broker) Stop() {
 // ──────────────────────────────────────────────────────────────────────
 
 var (
-	portFlag = flag.String("port", "1883", "TCP port to listen on")
+	portFlag    = flag.String("port", "1883", "TCP port to listen on")
+	usernameFlag = flag.String("username", "", "Username for authentication")
+	passwordFlag = flag.String("password", "", "Password for authentication")
 )
 
 func main() {
 	flag.Parse()
 	b := NewBroker(":" + *portFlag)
+	if *usernameFlag != "" {
+		b.SetAuth(*usernameFlag, *passwordFlag)
+	}
 	b.listen()
 }
